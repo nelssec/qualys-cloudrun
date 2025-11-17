@@ -293,21 +293,6 @@ You can deploy the scanner once to monitor all Cloud Run deployments across your
 
 See `ORGANIZATION_WIDE.md` for detailed setup instructions.
 
-## Comparison with qualys-aci
-
-This is the GCP equivalent of the [qualys-aci](https://github.com/nelssec/qualys-aci) solution for Azure. Same scanner image, different cloud platform.
-
-| Component | Azure (qualys-aci) | GCP (qualys-cloudrun) |
-|-----------|-------------------|---------------------|
-| Compute | Azure Container Instances | Cloud Run Jobs |
-| Functions | Azure Functions | Cloud Functions |
-| Events | Event Grid | Pub/Sub + Audit Logs |
-| Storage | Blob + Table Storage | Cloud Storage + Firestore |
-| IaC | Bicep | Terraform |
-| Scanner | qualys/qscanner:latest | qualys/qscanner:latest |
-
-Both implementations use the same qscanner command with QUALYS_ACCESS_TOKEN authentication.
-
 ## Contributing
 
 Contributions welcome! Please open issues or pull requests.
