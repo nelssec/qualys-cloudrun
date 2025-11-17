@@ -1,0 +1,9 @@
+# Google Cloud Platform SDKs
+google-cloud-run==0.10.0
+google-cloud-storage==2.14.0
+google-cloud-firestore==2.14.0
+google-cloud-logging==3.9.0
+google-cloud-pubsub==2.19.0
+
+# Cloud Functions framework
+functions-framework==3.5.0

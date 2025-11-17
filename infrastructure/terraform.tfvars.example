@@ -1,0 +1,14 @@
+# Example Terraform variables
+# Copy this file to terraform.tfvars and fill in your values
+
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+# Qualys configuration
+qualys_pod = "qualysapi.qualys.com"  # Or your specific Qualys POD URL
+
+# Optional: customize these values
+# firestore_location          = "nam5"
+# qscanner_image              = "qualys/qscanner:latest"
+# scan_cache_hours            = 24
+# notify_severity_threshold   = "HIGH"
