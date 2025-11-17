@@ -1,18 +1,18 @@
 # Qualys Container Scanner for Google Cloud Run
 
-Event-driven container image scanning for Google Cloud Run using Qualys qscanner. Automatically scan container images deployed to Cloud Run services for vulnerabilities and compliance issues.
+Automated container image scanning for Cloud Run deployments using Qualys qscanner. Scans happen automatically when you deploy or update Cloud Run services.
 
 ## Overview
 
-This solution provides automated security scanning of container images deployed to Google Cloud Run. When you deploy or update a Cloud Run service, the system:
+When you deploy a Cloud Run service, this system automatically scans the container image for vulnerabilities and compliance issues. The workflow is:
 
-1. **Detects** the deployment via Cloud Audit Logs
-2. **Triggers** a Cloud Function to process the event
-3. **Launches** a temporary Cloud Run Job running the official Qualys qscanner
-4. **Scans** the container image for vulnerabilities and compliance issues
-5. **Stores** results in Cloud Storage and Firestore
-6. **Alerts** on high-severity findings (optional)
-7. **Cleans up** the scan job automatically
+1. Cloud Audit Logs capture the Cloud Run deployment event
+2. Cloud Function processes the event and extracts container images
+3. Temporary Cloud Run Job spins up running the Qualys qscanner container
+4. Scanner analyzes the image and produces vulnerability/compliance data
+5. Results stored in Cloud Storage (detailed JSON) and Firestore (queryable metadata)
+6. Optional alerting on high-severity findings
+7. Scanner job automatically deleted after completion
 
 ## Architecture
 
@@ -32,24 +32,24 @@ Cloud Run Deployment
 
 ### Components
 
-- **Cloud Function**: Processes deployment events and orchestrates scans
-- **Cloud Run Jobs**: Ephemeral containers running Qualys qscanner
-- **Cloud Storage**: Stores detailed scan results as JSON files
-- **Firestore**: Indexes scan metadata for querying
-- **Secret Manager**: Securely stores Qualys credentials
-- **Pub/Sub**: Event routing from Cloud Audit Logs
-- **Cloud Logging**: Monitoring and troubleshooting
+- Cloud Function: Processes deployment events and orchestrates scans
+- Cloud Run Jobs: Ephemeral containers running Qualys qscanner
+- Cloud Storage: Stores detailed scan results as JSON files
+- Firestore: Indexes scan metadata for querying
+- Secret Manager: Stores Qualys credentials
+- Pub/Sub: Event routing from Cloud Audit Logs
+- Cloud Logging: Monitoring and troubleshooting
 
 ## Features
 
-- ✅ **Event-Driven**: Automatic scanning on Cloud Run deployments
-- ✅ **Official Scanner**: Uses the official `qualys/qscanner` Docker image
-- ✅ **Ephemeral Infrastructure**: No permanent scanning infrastructure
-- ✅ **Scan Caching**: Avoid duplicate scans with configurable cache period (default: 24 hours)
-- ✅ **Multi-Project Support**: Can scan images from different GCP projects
-- ✅ **Comprehensive Results**: Vulnerability details, severity levels, compliance checks
-- ✅ **Alerting**: Optional notifications for high-severity findings
-- ✅ **Fully Automated**: Terraform-based infrastructure deployment
+- Event-driven scanning triggered by Cloud Run deployments
+- Uses official qualys/qscanner Docker image
+- No permanent scanning infrastructure - jobs are ephemeral
+- Scan caching to avoid duplicates (default 24 hours)
+- Single project or organization-wide deployment
+- Full vulnerability details with severity levels and compliance checks
+- Optional alerting for high-severity findings
+- Infrastructure deployed via Terraform
 
 ## Prerequisites
 
@@ -119,20 +119,28 @@ gcloud run deploy myapp \
 | `scan_cache_hours` | Cache period | `24` |
 | `notify_severity_threshold` | Alert threshold | `HIGH` |
 
-### Environment Variables (Cloud Function)
+### Environment Variables
 
-The Cloud Function is configured with these environment variables (set automatically by Terraform):
+Terraform configures these environment variables for the Cloud Function:
 
-- `GCP_PROJECT_ID`: GCP project ID
-- `GCP_REGION`: Deployment region
-- `SCAN_RESULTS_BUCKET`: Cloud Storage bucket for results
-- `QUALYS_POD`: Qualys POD URL
-- `QUALYS_ACCESS_TOKEN`: Qualys API token (from Secret Manager)
-- `QSCANNER_IMAGE`: Scanner Docker image
-- `SCAN_TIMEOUT`: Maximum scan time in seconds (default: 1800)
-- `SCAN_CACHE_HOURS`: Cache period to avoid duplicate scans
-- `NOTIFY_SEVERITY_THRESHOLD`: Minimum severity for alerts (CRITICAL or HIGH)
-- `CLOUDRUN_SERVICE_ACCOUNT`: Service account for Cloud Run Jobs
+- GCP_PROJECT_ID: Project where infrastructure is deployed
+- GCP_REGION: Region for Cloud Run Jobs
+- SCAN_RESULTS_BUCKET: Cloud Storage bucket name
+- QUALYS_POD: Qualys POD URL
+- QUALYS_ACCESS_TOKEN: API token from Secret Manager
+- QSCANNER_IMAGE: Scanner image (default: qualys/qscanner:latest)
+- SCAN_TIMEOUT: Maximum scan duration in seconds (default: 1800)
+- SCAN_CACHE_HOURS: How long to cache scan results (default: 24)
+- NOTIFY_SEVERITY_THRESHOLD: Alert threshold (CRITICAL or HIGH)
+- CLOUDRUN_SERVICE_ACCOUNT: Service account for scanner jobs
+
+The qscanner command executed is:
+
+```bash
+qscanner image <image:tag> --pod <qualys_pod> --skip-verify-tls --output-format json
+```
+
+Authentication uses the QUALYS_ACCESS_TOKEN environment variable.
 
 ## Viewing Scan Results
 
@@ -279,31 +287,26 @@ functions-framework --target=process_cloudrun_event --debug
 python -m pytest tests/
 ```
 
-## Multi-Project Scanning
+## Organization-Wide Scanning
 
-To scan Cloud Run services across multiple GCP projects:
+You can deploy the scanner once to monitor all Cloud Run deployments across your entire GCP organization. Instead of deploying in each project, deploy in a central security project and configure an organization-level log sink.
 
-1. Deploy the scanner in a central "security" project
-2. Configure Cloud Audit Log sinks in each target project
-3. Route all logs to the central Pub/Sub topic
-4. Grant the scanner service account permissions in target projects
-
-See `MULTI_PROJECT.md` for detailed instructions.
+See `ORGANIZATION_WIDE.md` for detailed setup instructions.
 
 ## Comparison with qualys-aci
 
-This solution is the Google Cloud Platform equivalent of [qualys-aci](https://github.com/nelssec/qualys-aci):
+This is the GCP equivalent of the [qualys-aci](https://github.com/nelssec/qualys-aci) solution for Azure. Same scanner image, different cloud platform.
 
-| Feature | qualys-aci (Azure) | qualys-cloudrun (GCP) |
-|---------|-------------------|---------------------|
+| Component | Azure (qualys-aci) | GCP (qualys-cloudrun) |
+|-----------|-------------------|---------------------|
 | Compute | Azure Container Instances | Cloud Run Jobs |
 | Functions | Azure Functions | Cloud Functions |
 | Events | Event Grid | Pub/Sub + Audit Logs |
 | Storage | Blob + Table Storage | Cloud Storage + Firestore |
 | IaC | Bicep | Terraform |
-| Scanner | qualys/qscanner | qualys/qscanner |
+| Scanner | qualys/qscanner:latest | qualys/qscanner:latest |
 
-Both use the same official Qualys scanner image and provide equivalent functionality.
+Both implementations use the same qscanner command with QUALYS_ACCESS_TOKEN authentication.
 
 ## Contributing
 

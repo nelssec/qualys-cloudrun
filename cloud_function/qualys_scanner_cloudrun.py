@@ -323,6 +323,7 @@ class QScannerCloudRun:
             'image',
             image_id,
             '--pod', self.qualys_pod,
+            '--skip-verify-tls',
             '--output-format', 'json'
         ]
 
