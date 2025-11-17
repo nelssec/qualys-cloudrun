@@ -1,0 +1,50 @@
+{
+  "insertId": "test-insert-id",
+  "logName": "projects/my-project/logs/cloudaudit.googleapis.com%2Factivity",
+  "protoPayload": {
+    "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+    "authenticationInfo": {
+      "principalEmail": "user@example.com"
+    },
+    "methodName": "google.cloud.run.v2.Services.CreateService",
+    "request": {
+      "@type": "type.googleapis.com/google.cloud.run.v2.Service",
+      "template": {
+        "containers": [
+          {
+            "image": "gcr.io/my-project/my-app:v1.0.0",
+            "name": "my-app-container",
+            "ports": [
+              {
+                "containerPort": 8080
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "1000m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ],
+        "scaling": {
+          "minInstanceCount": 0,
+          "maxInstanceCount": 10
+        }
+      }
+    },
+    "resourceName": "projects/my-project/locations/us-central1/services/my-app",
+    "serviceName": "run.googleapis.com"
+  },
+  "receiveTimestamp": "2024-01-15T10:30:00.123456Z",
+  "resource": {
+    "labels": {
+      "location": "us-central1",
+      "project_id": "my-project",
+      "service_name": "my-app"
+    },
+    "type": "cloud_run_revision"
+  },
+  "severity": "NOTICE",
+  "timestamp": "2024-01-15T10:30:00.123456Z"
+}
