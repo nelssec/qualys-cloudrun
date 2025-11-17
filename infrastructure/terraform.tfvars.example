@@ -1,11 +1,11 @@
 # Example Terraform variables
 # Copy this file to terraform.tfvars and fill in your values
 
-project_id = "your-gcp-project-id"
+project_id = "my-gcp-project"
 region     = "us-central1"
 
-# Qualys configuration
-qualys_pod = "qualysapi.qualys.com"  # Or your specific Qualys POD URL
+# Qualys POD (e.g., US01, US02, US03, EU1, EU2, IN1, etc.)
+qualys_pod = "US02"
 
 # Optional: customize these values
 # firestore_location          = "nam5"

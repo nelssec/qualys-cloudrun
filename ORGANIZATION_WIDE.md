@@ -54,7 +54,7 @@ Update with your security project details:
 ```hcl
 project_id = "your-security-project"
 region     = "us-central1"
-qualys_pod = "qualysapi.qualys.com"
+qualys_pod = "US02"
 ```
 
 Deploy:

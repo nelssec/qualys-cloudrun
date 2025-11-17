@@ -52,7 +52,7 @@ Update `terraform.tfvars` with your configuration:
 ```hcl
 project_id = "your-gcp-project-id"
 region     = "us-central1"
-qualys_pod = "qualysapi.qualys.com"  # Or your specific Qualys POD
+qualys_pod = "US02"  # Your Qualys POD (US01, US02, US03, EU1, EU2, IN1, etc.)
 
 # Optional customizations
 # firestore_location          = "nam5"
