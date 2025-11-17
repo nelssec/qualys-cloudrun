@@ -107,7 +107,7 @@ gcloud run deploy myapp \
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `project_id` | GCP Project ID | `my-project-123` |
-| `qualys_pod` | Qualys POD URL | `qualysapi.qualys.com` |
+| `qualys_pod` | Qualys POD identifier | `US02`, `EU1`, `IN1` |
 
 ### Optional Variables
 
@@ -126,7 +126,7 @@ Terraform configures these environment variables for the Cloud Function:
 - GCP_PROJECT_ID: Project where infrastructure is deployed
 - GCP_REGION: Region for Cloud Run Jobs
 - SCAN_RESULTS_BUCKET: Cloud Storage bucket name
-- QUALYS_POD: Qualys POD URL
+- QUALYS_POD: Qualys POD identifier (US02, EU1, etc.)
 - QUALYS_ACCESS_TOKEN: API token from Secret Manager
 - QSCANNER_IMAGE: Scanner image (default: qualys/qscanner:latest)
 - SCAN_TIMEOUT: Maximum scan duration in seconds (default: 1800)
@@ -273,7 +273,7 @@ pip install -r requirements.txt
 
 # Set environment variables
 export GCP_PROJECT_ID=your-project
-export QUALYS_POD=qualysapi.qualys.com
+export QUALYS_POD=US02
 export QUALYS_ACCESS_TOKEN=your-token
 export SCAN_RESULTS_BUCKET=your-bucket
 

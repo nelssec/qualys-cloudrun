@@ -16,7 +16,7 @@ pip install -r requirements.txt
 export GCP_PROJECT_ID=your-project
 export GCP_REGION=us-central1
 export SCAN_RESULTS_BUCKET=your-bucket
-export QUALYS_POD=qualysapi.qualys.com
+export QUALYS_POD=US02
 export QUALYS_ACCESS_TOKEN=your-token
 export CLOUDRUN_SERVICE_ACCOUNT=scanner@your-project.iam.gserviceaccount.com
 

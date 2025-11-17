@@ -20,7 +20,7 @@ variable "firestore_location" {
 }
 
 variable "qualys_pod" {
-  description = "Qualys POD URL (e.g., qualysapi.qualys.com)"
+  description = "Qualys POD identifier (e.g., US01, US02, US03, EU1, EU2, IN1)"
   type        = string
 }
 
