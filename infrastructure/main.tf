@@ -272,7 +272,7 @@ resource "google_cloudfunctions2_function" "scanner_function" {
       NOTIFY_SEVERITY_THRESHOLD = var.notify_severity_threshold
       CLOUDRUN_SERVICE_ACCOUNT  = google_service_account.scanner_jobs.email
       # Secret Manager reference for Cloud Run Jobs to access Qualys token
-      QUALYS_SECRET_REF         = "${google_secret_manager_secret.qualys_token.name}/versions/latest"
+      QUALYS_SECRET_REF         = google_secret_manager_secret.qualys_token.name
     }
 
     secret_environment_variables {

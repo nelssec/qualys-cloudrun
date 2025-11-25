@@ -1,12 +1,16 @@
 """
 Google Cloud Function for processing Cloud Run deployment events
 Triggered by Pub/Sub messages from Cloud Audit Logs
+
+This is a Gen2 Cloud Function using CloudEvents format.
 """
 import os
 import json
 import logging
 import base64
 from datetime import datetime
+import functions_framework
+from cloudevents.http import CloudEvent
 from qualys_scanner_cloudrun import QScannerCloudRun
 from image_parser import ImageParser, ImageParserError
 from storage_handler import StorageHandler
@@ -39,24 +43,30 @@ def _sanitize_tag_value(value: str) -> str:
     return sanitized
 
 
-def process_cloudrun_event(event, context):
+@functions_framework.cloud_event
+def process_cloudrun_event(cloud_event: CloudEvent):
     """
     Cloud Function triggered by Pub/Sub message from Cloud Audit Logs
 
     Args:
-        event: Pub/Sub message event
-        context: Cloud Function context
+        cloud_event: CloudEvent containing Pub/Sub message data
     """
-    logger.info(f'Processing Cloud Run event: {context.event_id}')
+    event_id = cloud_event.get("id", "unknown")
+    logger.info(f'Processing Cloud Run event: {event_id}')
 
     try:
-        # Decode Pub/Sub message
-        if 'data' in event:
-            message_data = base64.b64decode(event['data']).decode('utf-8')
-            audit_log = json.loads(message_data)
-        else:
+        # Extract Pub/Sub message data from CloudEvent
+        # The data is in cloud_event.data which contains the Pub/Sub message
+        pubsub_message = cloud_event.data.get("message", {})
+        message_data_b64 = pubsub_message.get("data", "")
+
+        if not message_data_b64:
             logger.warning('No data in Pub/Sub message')
             return
+
+        # Decode base64 message data
+        message_data = base64.b64decode(message_data_b64).decode('utf-8')
+        audit_log = json.loads(message_data)
 
         # Extract event details from Cloud Audit Log
         logger.info(f'Audit log method: {audit_log.get("protoPayload", {}).get("methodName")}')
@@ -126,7 +136,7 @@ def process_cloudrun_event(event, context):
                     'gcp_project': _sanitize_tag_value(project_id),
                     'service_name': _sanitize_tag_value(service_name),
                     'location': _sanitize_tag_value(location),
-                    'event_id': _sanitize_tag_value(context.event_id)
+                    'event_id': _sanitize_tag_value(event_id)
                 }
 
                 # Scan the image

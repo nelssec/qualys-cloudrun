@@ -5,5 +5,6 @@ google-cloud-firestore==2.14.0
 google-cloud-logging==3.9.0
 google-cloud-pubsub==2.19.0
 
-# Cloud Functions framework
+# Cloud Functions framework (Gen2 CloudEvents support)
 functions-framework==3.5.0
+cloudevents==1.10.1
