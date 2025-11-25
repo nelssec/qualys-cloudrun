@@ -1,14 +1,44 @@
-# Example Terraform variables
+# Example Terraform variables for Qualys Cloud Run Scanner
 # Copy this file to terraform.tfvars and fill in your values
+#
+# SECURITY NOTE: Do not commit terraform.tfvars to version control
+# as it may contain sensitive project-specific configuration.
 
+# Required: GCP Project ID (must match GCP naming conventions)
 project_id = "my-gcp-project"
-region     = "us-central1"
 
-# Qualys POD (e.g., US01, US02, US03, EU1, EU2, IN1, etc.)
+# Required: GCP region for deployment
+region = "us-central1"
+
+# Required: Qualys POD identifier
+# Valid values: US01, US02, US03, US04, EU1, EU2, IN1, AP1, AP2, CA1, AE1, UK1
 qualys_pod = "US02"
 
-# Optional: customize these values
-# firestore_location          = "nam5"
-# qscanner_image              = "qualys/qscanner:latest"
-# scan_cache_hours            = 24
-# notify_severity_threshold   = "HIGH"
+# Optional: Firestore location (multi-region)
+# Valid values: nam5 (North America), eur3 (Europe), asia1 (Asia)
+# firestore_location = "nam5"
+
+# Optional: qscanner Docker image
+# SECURITY: Pin to specific version in production (avoid :latest)
+# qscanner_image = "qualys/qscanner:1.25"
+
+# Optional: Scan result caching (hours)
+# Range: 1-168 (1 hour to 1 week)
+# scan_cache_hours = 24
+
+# Optional: Scan results retention (days)
+# Range: 30-365 (for compliance requirements)
+# scan_results_retention_days = 90
+
+# Optional: Severity threshold for alerts
+# Valid values: CRITICAL, HIGH
+# notify_severity_threshold = "HIGH"
+
+# Optional: Maximum Cloud Function instances
+# Range: 1-100
+# max_function_instances = 10
+
+# Optional: VPC connector for private networking
+# SECURITY: Recommended for enterprise deployments to restrict egress
+# enable_vpc_connector = false
+# vpc_connector_name = "projects/my-project/locations/us-central1/connectors/my-connector"

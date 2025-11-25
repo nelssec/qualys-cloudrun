@@ -49,7 +49,11 @@ resource "google_storage_bucket" "scan_results" {
   location      = var.region
   force_destroy = false
 
+  # Security: Enforce uniform bucket-level access (no ACLs)
   uniform_bucket_level_access = true
+
+  # Security: Prevent public access - critical for enterprise
+  public_access_prevention = "enforced"
 
   versioning {
     enabled = true
@@ -57,11 +61,16 @@ resource "google_storage_bucket" "scan_results" {
 
   lifecycle_rule {
     condition {
-      age = 90 # Keep results for 90 days
+      age = var.scan_results_retention_days
     }
     action {
       type = "Delete"
     }
+  }
+
+  # Security: Enable soft delete for recovery from accidental deletion
+  soft_delete_policy {
+    retention_duration_seconds = 604800 # 7 days
   }
 
   depends_on = [google_project_service.required_apis]
@@ -92,13 +101,18 @@ resource "google_service_account" "scanner_jobs" {
 }
 
 # IAM permissions for function service account
+# Following principle of least privilege - only grant minimum required permissions
 resource "google_project_iam_member" "function_permissions" {
   for_each = toset([
-    "roles/storage.objectAdmin",
+    # Storage: objectUser allows create/read/delete objects but not bucket admin
+    "roles/storage.objectUser",
+    # Firestore: datastore.user for read/write documents
     "roles/datastore.user",
+    # Logging: required for Cloud Function logging
     "roles/logging.logWriter",
-    "roles/run.admin",
-    "roles/secretmanager.secretAccessor"
+    # Cloud Run: developer role for creating/running jobs (not admin)
+    "roles/run.developer",
+    # Note: Secret access is granted at secret-level below, not project-level
   ])
 
   project = var.project_id
@@ -115,6 +129,14 @@ resource "google_project_iam_member" "job_permissions" {
   project = var.project_id
   role    = each.key
   member  = "serviceAccount:${google_service_account.scanner_jobs.email}"
+}
+
+# Grant Cloud Run Jobs service account access to Qualys secret
+# This allows the qscanner container to access the token via Secret Manager
+resource "google_secret_manager_secret_iam_member" "job_secret_access" {
+  secret_id = google_secret_manager_secret.qualys_token.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.scanner_jobs.email}"
 }
 
 # Secret for Qualys access token
@@ -174,9 +196,30 @@ data "archive_file" "function_source" {
 resource "google_storage_bucket" "function_source" {
   name          = "${var.project_id}-function-source"
   location      = var.region
-  force_destroy = true
+  # Security: Prevent accidental deletion in production
+  force_destroy = false
 
+  # Security: Enforce uniform bucket-level access (no ACLs)
   uniform_bucket_level_access = true
+
+  # Security: Prevent public access
+  public_access_prevention = "enforced"
+
+  # Enable versioning for audit trail
+  versioning {
+    enabled = true
+  }
+
+  # Lifecycle rule to clean up old function source versions
+  lifecycle_rule {
+    condition {
+      num_newer_versions = 5 # Keep last 5 versions
+      with_state         = "ARCHIVED"
+    }
+    action {
+      type = "Delete"
+    }
+  }
 }
 
 resource "google_storage_bucket_object" "function_source" {
@@ -204,10 +247,19 @@ resource "google_cloudfunctions2_function" "scanner_function" {
   }
 
   service_config {
-    max_instance_count    = 10
+    max_instance_count    = var.max_function_instances
+    min_instance_count    = 0 # Scale to zero when not in use
     available_memory      = "512Mi"
     timeout_seconds       = 540
     service_account_email = google_service_account.scanner_function.email
+
+    # Security: All egress through VPC if connector is configured
+    ingress_settings               = "ALLOW_INTERNAL_ONLY"
+    all_traffic_on_latest_revision = true
+
+    # VPC connector for private networking (optional)
+    vpc_connector                  = var.enable_vpc_connector ? var.vpc_connector_name : null
+    vpc_connector_egress_settings  = var.enable_vpc_connector ? "ALL_TRAFFIC" : null
 
     environment_variables = {
       GCP_PROJECT_ID            = var.project_id
@@ -219,13 +271,15 @@ resource "google_cloudfunctions2_function" "scanner_function" {
       SCAN_CACHE_HOURS          = var.scan_cache_hours
       NOTIFY_SEVERITY_THRESHOLD = var.notify_severity_threshold
       CLOUDRUN_SERVICE_ACCOUNT  = google_service_account.scanner_jobs.email
+      # Secret Manager reference for Cloud Run Jobs to access Qualys token
+      QUALYS_SECRET_REF         = "${google_secret_manager_secret.qualys_token.name}/versions/latest"
     }
 
     secret_environment_variables {
       key        = "QUALYS_ACCESS_TOKEN"
       project_id = var.project_id
       secret     = google_secret_manager_secret.qualys_token.secret_id
-      version    = "latest"
+      version    = "latest" # Consider pinning to specific version in production
     }
   }
 

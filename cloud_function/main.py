@@ -8,12 +8,35 @@ import logging
 import base64
 from datetime import datetime
 from qualys_scanner_cloudrun import QScannerCloudRun
-from image_parser import ImageParser
+from image_parser import ImageParser, ImageParserError
 from storage_handler import StorageHandler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_tag_value(value: str) -> str:
+    """
+    Sanitize a value for use in qscanner custom tags
+
+    Args:
+        value: Raw value to sanitize
+
+    Returns:
+        Sanitized value safe for command line use
+    """
+    if not value:
+        return ''
+
+    # Convert to string and limit length
+    value = str(value)[:128]
+
+    # Remove or replace dangerous characters
+    # Only allow alphanumeric, hyphen, underscore, period
+    sanitized = ''.join(c if c.isalnum() or c in '-_.' else '_' for c in value)
+
+    return sanitized
 
 
 def process_cloudrun_event(event, context):
@@ -77,20 +100,33 @@ def process_cloudrun_event(event, context):
             logger.info(f'Processing image: {image}')
 
             try:
-                image_info = ImageParser.parse(image)
+                # Security: Validate and parse image name
+                try:
+                    image_info = ImageParser.parse(image)
+                except ImageParserError as parse_error:
+                    logger.warning(f'Invalid image name rejected: {image} - {str(parse_error)}')
+                    storage.save_error({
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'image': image[:256],  # Truncate for safety
+                        'error': f'Invalid image name: {str(parse_error)}',
+                        'error_type': 'VALIDATION_ERROR',
+                        'service_name': service_name,
+                        'project_id': project_id
+                    })
+                    continue
 
                 # Check if recently scanned
                 if storage.is_recently_scanned(image_info['full_name']):
                     logger.info(f'Image {image} was recently scanned, skipping')
                     continue
 
-                # Custom tags for tracking
+                # Custom tags for tracking - sanitize values
                 custom_tags = {
                     'container_type': 'cloudrun',
-                    'gcp_project': project_id,
-                    'service_name': service_name,
-                    'location': location,
-                    'event_id': context.event_id
+                    'gcp_project': _sanitize_tag_value(project_id),
+                    'service_name': _sanitize_tag_value(service_name),
+                    'location': _sanitize_tag_value(location),
+                    'event_id': _sanitize_tag_value(context.event_id)
                 }
 
                 # Scan the image
@@ -128,8 +164,9 @@ def process_cloudrun_event(event, context):
                 logger.error(f'Error processing image {image}: {str(img_error)}')
                 storage.save_error({
                     'timestamp': datetime.utcnow().isoformat(),
-                    'image': image,
+                    'image': image[:256],  # Truncate for safety
                     'error': str(img_error),
+                    'error_type': 'SCAN_ERROR',
                     'service_name': service_name,
                     'project_id': project_id
                 })

@@ -5,6 +5,8 @@ Runs qscanner in a container on-demand for each scan
 import os
 import json
 import logging
+import re
+import shlex
 import time
 from typing import Dict, Optional
 from datetime import datetime
@@ -17,6 +19,11 @@ class QScannerCloudRun:
     Run qscanner scans using Google Cloud Run Jobs
     Uses the official qualys/qscanner Docker image from Docker Hub
     """
+
+    # Security: Pattern for valid image identifiers
+    VALID_IMAGE_PATTERN = re.compile(
+        r'^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9](:[a-zA-Z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'
+    )
 
     def __init__(self, project_id: Optional[str] = None):
         """
@@ -34,13 +41,47 @@ class QScannerCloudRun:
         self.executions_client = run_v2.ExecutionsClient()
 
         # qscanner configuration
-        self.qscanner_image = os.environ.get('QSCANNER_IMAGE', 'qualys/qscanner:latest')
+        self.qscanner_image = os.environ.get('QSCANNER_IMAGE', 'qualys/qscanner:1.25')
         self.qualys_pod = os.environ.get('QUALYS_POD')
         self.qualys_access_token = os.environ.get('QUALYS_ACCESS_TOKEN')
         self.scan_timeout = int(os.environ.get('SCAN_TIMEOUT', '1800'))
 
         # Service account for Cloud Run Jobs
         self.service_account = os.environ.get('CLOUDRUN_SERVICE_ACCOUNT')
+
+        # Secret Manager configuration for Cloud Run Jobs
+        # Format: projects/PROJECT_ID/secrets/SECRET_NAME/versions/VERSION
+        self.qualys_secret_ref = os.environ.get(
+            'QUALYS_SECRET_REF',
+            f'projects/{self.project_id}/secrets/qualys-access-token/versions/latest'
+        )
+
+    def _validate_image_id(self, image_id: str) -> bool:
+        """
+        Validate image identifier for security
+
+        Args:
+            image_id: Full image identifier
+
+        Returns:
+            True if valid
+
+        Raises:
+            ValueError: If image_id is invalid
+        """
+        if not image_id or len(image_id) > 512:
+            raise ValueError("Invalid image identifier length")
+
+        # Check for shell injection characters
+        dangerous_chars = ['$', '`', ';', '&', '|', '>', '<', '\n', '\r', '\0', '\\', "'", '"']
+        for char in dangerous_chars:
+            if char in image_id:
+                raise ValueError(f"Image identifier contains invalid character: {repr(char)}")
+
+        if not self.VALID_IMAGE_PATTERN.match(image_id):
+            raise ValueError(f"Image identifier does not match expected pattern")
+
+        return True
 
     def scan_image(self, registry: str, repository: str, tag: str = 'latest',
                    digest: Optional[str] = None, custom_tags: Optional[Dict] = None) -> Dict:
@@ -56,11 +97,17 @@ class QScannerCloudRun:
 
         Returns:
             Dictionary containing scan results
+
+        Raises:
+            ValueError: If image identifier is invalid
         """
         # Construct image identifier
         image_id = f'{registry}/{repository}:{tag}'
         if digest:
             image_id = f'{registry}/{repository}@{digest}'
+
+        # Security: Validate image identifier before use
+        self._validate_image_id(image_id)
 
         logging.info(f'Scanning image with qscanner Cloud Run: {image_id}')
 
@@ -117,19 +164,29 @@ class QScannerCloudRun:
         """
         logging.info(f'Creating Cloud Run Job: {job_name}')
 
-        # Build qscanner command
+        # Build qscanner command with proper shell quoting
         command = self._build_qscanner_command(image_id, custom_tags)
 
-        # Environment variables for qscanner
-        env_vars = [
-            run_v2.EnvVar(name='QUALYS_ACCESS_TOKEN', value=self.qualys_access_token),
-        ]
+        # Security: Use Secret Manager reference instead of passing token as env var
+        # This avoids exposing the token in job definitions, logs, or environment
+        env_vars = []
+
+        # Secret reference for QUALYS_ACCESS_TOKEN from Secret Manager
+        secret_env_var = run_v2.EnvVar(
+            name='QUALYS_ACCESS_TOKEN',
+            value_source=run_v2.EnvVarSource(
+                secret_key_ref=run_v2.SecretKeySelector(
+                    secret=self.qualys_secret_ref,
+                    version='latest'
+                )
+            )
+        )
 
         # Container configuration
         container = run_v2.Container(
             image=self.qscanner_image,
             command=['/bin/sh', '-c'],
-            args=[' '.join(command)],
+            args=[command],  # Command is now a properly quoted string
             env=env_vars,
             resources=run_v2.ResourceRequirements(
                 limits={
@@ -138,6 +195,9 @@ class QScannerCloudRun:
                 }
             )
         )
+
+        # Add secret environment variable
+        container.env.append(secret_env_var)
 
         # Job template
         template = run_v2.TaskTemplate(
@@ -307,32 +367,52 @@ class QScannerCloudRun:
 
         return f'{base_name}-{timestamp}'
 
-    def _build_qscanner_command(self, image_id: str, custom_tags: Optional[Dict] = None) -> list:
+    def _sanitize_tag_key(self, key: str) -> str:
+        """Sanitize tag key for safe command line use"""
+        if not key or not isinstance(key, str):
+            return ''
+        # Only allow alphanumeric and underscore
+        return ''.join(c if c.isalnum() or c == '_' else '' for c in key[:64])
+
+    def _sanitize_tag_value(self, value: str) -> str:
+        """Sanitize tag value for safe command line use"""
+        if not value or not isinstance(value, str):
+            return ''
+        # Only allow alphanumeric, hyphen, underscore, period
+        return ''.join(c if c.isalnum() or c in '-_.' else '_' for c in str(value)[:128])
+
+    def _build_qscanner_command(self, image_id: str, custom_tags: Optional[Dict] = None) -> str:
         """
-        Build qscanner command for container
+        Build qscanner command for container with proper shell quoting
 
         Args:
-            image_id: Full image identifier
+            image_id: Full image identifier (must be pre-validated)
             custom_tags: Optional tags for tracking
 
         Returns:
-            Command as list
+            Properly quoted command string safe for shell execution
         """
+        # Security: Use shlex.quote for all dynamic values
         cmd_parts = [
             'qscanner',
             'image',
-            image_id,
-            '--pod', self.qualys_pod,
+            shlex.quote(image_id),
+            '--pod', shlex.quote(self.qualys_pod),
             '--skip-verify-tls',
             '--output-format', 'json'
         ]
 
-        # Add custom tags
+        # Add custom tags with sanitization and quoting
         if custom_tags:
             for key, value in custom_tags.items():
-                cmd_parts.extend(['--tag', f'{key}={value}'])
+                sanitized_key = self._sanitize_tag_key(key)
+                sanitized_value = self._sanitize_tag_value(value)
+                if sanitized_key and sanitized_value:
+                    # Double protection: sanitize AND quote
+                    tag_arg = shlex.quote(f'{sanitized_key}={sanitized_value}')
+                    cmd_parts.extend(['--tag', tag_arg])
 
-        return cmd_parts
+        return ' '.join(cmd_parts)
 
     def _parse_qscanner_output(self, output: str) -> Dict:
         """Parse qscanner JSON output"""
