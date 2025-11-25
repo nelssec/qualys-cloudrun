@@ -1,265 +1,568 @@
 # Qualys Container Scanner for Google Cloud Run
 
-Automated container image scanning for Cloud Run deployments using Qualys qscanner. Scans happen automatically when you deploy or update Cloud Run services.
+Automated vulnerability scanning for container images deployed to Google Cloud Run. This solution provides event-driven security scanning using Qualys qscanner, triggered automatically when Cloud Run services are created or updated.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Security Features](#security-features)
+- [Prerequisites](#prerequisites)
+- [Deployment](#deployment)
+  - [Single Project](#single-project-deployment)
+  - [Multi-Region](#multi-region-deployment)
+  - [Organization-Wide](#organization-wide-deployment)
+- [Configuration Reference](#configuration-reference)
+- [Operations](#operations)
+- [Troubleshooting](#troubleshooting)
+- [Cost Estimation](#cost-estimation)
 
 ## Overview
 
-When you deploy a Cloud Run service, this system automatically scans the container image for vulnerabilities and compliance issues. The workflow is:
+This solution implements automated container image scanning for Cloud Run deployments. When a Cloud Run service is deployed or updated, the system:
 
-1. Cloud Audit Logs capture the Cloud Run deployment event
-2. Cloud Function processes the event and extracts container images
-3. Temporary Cloud Run Job spins up running the Qualys qscanner container
-4. Scanner analyzes the image and produces vulnerability/compliance data
-5. Results stored in Cloud Storage (detailed JSON) and Firestore (queryable metadata)
-6. Optional alerting on high-severity findings
-7. Scanner job automatically deleted after completion
+1. Captures the deployment event via Cloud Audit Logs
+2. Routes the event through Pub/Sub to a Cloud Function
+3. Extracts container image references from the service definition
+4. Spawns an ephemeral Cloud Run Job running Qualys qscanner
+5. Stores vulnerability and compliance data in Cloud Storage and Firestore
+6. Optionally triggers alerts for high-severity findings
+7. Automatically cleans up the scanner job after completion
+
+The scanner uses the official `qualys/qscanner` Docker image and authenticates via Secret Manager, ensuring credentials are never exposed in logs or job definitions.
 
 ## Architecture
 
 ```
-Cloud Run Deployment
-        ↓
-  Cloud Audit Logs
-        ↓
-   Pub/Sub Topic
-        ↓
-  Cloud Function (Event Processor)
-        ↓
-  Cloud Run Job (qscanner)
-        ↓
-  Cloud Storage (Results) + Firestore (Metadata)
+                                    Single Project
+    +------------------------------------------------------------------+
+    |                                                                  |
+    |   Cloud Run Service Deployment                                   |
+    |            |                                                     |
+    |            v                                                     |
+    |   Cloud Audit Logs                                               |
+    |            |                                                     |
+    |            v                                                     |
+    |   Logging Sink -----> Pub/Sub Topic                              |
+    |                            |                                     |
+    |                            v                                     |
+    |                    Cloud Function (Gen2)                         |
+    |                            |                                     |
+    |                            v                                     |
+    |                    Cloud Run Job (qscanner)                      |
+    |                            |                                     |
+    |                            v                                     |
+    |            +---------------+---------------+                     |
+    |            |                               |                     |
+    |            v                               v                     |
+    |    Cloud Storage                      Firestore                  |
+    |    (Detailed JSON)                 (Queryable Metadata)          |
+    |                                                                  |
+    +------------------------------------------------------------------+
 ```
 
 ### Components
 
-- Cloud Function: Processes deployment events and orchestrates scans
-- Cloud Run Jobs: Ephemeral containers running Qualys qscanner
-- Cloud Storage: Stores detailed scan results as JSON files
-- Firestore: Indexes scan metadata for querying
-- Secret Manager: Stores Qualys credentials
-- Pub/Sub: Event routing from Cloud Audit Logs
-- Cloud Logging: Monitoring and troubleshooting
+| Component | Purpose |
+|-----------|---------|
+| Cloud Function (Gen2) | Event processor that orchestrates scans |
+| Cloud Run Jobs | Ephemeral containers running Qualys qscanner |
+| Cloud Storage | Stores detailed scan results as JSON files |
+| Firestore | Indexes scan metadata for querying and dashboards |
+| Secret Manager | Securely stores Qualys API credentials |
+| Pub/Sub | Event routing from Cloud Audit Logs |
+| Logging Sink | Filters and routes Cloud Run deployment events |
 
-## Features
+### Event Flow
 
-- Event-driven scanning triggered by Cloud Run deployments
-- Uses official qualys/qscanner Docker image
-- No permanent scanning infrastructure - jobs are ephemeral
-- Scan caching to avoid duplicates (default 24 hours)
-- Single project or organization-wide deployment
-- Full vulnerability details with severity levels and compliance checks
-- Optional alerting for high-severity findings
-- Infrastructure deployed via Terraform
+1. **Audit Log Generation**: Cloud Run generates audit logs for `CreateService` and `UpdateService` operations
+2. **Log Sink Filtering**: The logging sink filters for Cloud Run revision events and forwards to Pub/Sub
+3. **Event Processing**: The Cloud Function receives CloudEvents via Pub/Sub trigger
+4. **Image Extraction**: Container images are extracted from the service template in the audit log
+5. **Deduplication**: Recent scans are checked in Firestore to avoid duplicate scanning
+6. **Job Creation**: A Cloud Run Job is created with the qscanner container
+7. **Scan Execution**: qscanner analyzes the image against Qualys vulnerability database
+8. **Result Storage**: Results are stored in Cloud Storage (full JSON) and Firestore (metadata)
+9. **Cleanup**: The scanner job is deleted after completion
+
+## Security Features
+
+This solution implements security hardening for enterprise deployments:
+
+### IAM and Access Control
+
+- **Least Privilege**: Service accounts are granted minimum required permissions
+  - Cloud Function SA: `storage.objectUser`, `datastore.user`, `logging.logWriter`, `run.developer`
+  - Cloud Run Jobs SA: `logging.logWriter`, `secretmanager.secretAccessor` (secret-level only)
+- **Secret-Level IAM**: Qualys token access is granted at the individual secret level, not project-level
+- **No Project-Level Admin Roles**: Uses `run.developer` instead of `run.admin`
+
+### Secret Management
+
+- Qualys API token stored in Secret Manager
+- Cloud Run Jobs access secrets via Secret Manager references, not environment variables
+- Credentials never appear in job definitions, logs, or environment listings
+
+### Input Validation
+
+- Container image names validated against OCI specification patterns
+- Shell injection characters blocked: `$`, backtick, `;`, `&`, `|`, `>`, `<`, `\n`, `\0`, `\`
+- Maximum length limits to prevent DoS attacks
+- Custom tag values sanitized before use in commands
+- All command arguments use `shlex.quote()` for safe shell execution
+
+### Storage Security
+
+- Cloud Storage buckets configured with `public_access_prevention = "enforced"`
+- Uniform bucket-level access enabled (no legacy ACLs)
+- Soft delete policy for accidental deletion recovery
+- Versioning enabled for audit trail
+
+### Network Security
+
+- Cloud Function ingress restricted to internal traffic only
+- Optional VPC connector support for private networking
+- VPC Service Controls compatible
 
 ## Prerequisites
 
-- GCP project with billing enabled
+- Google Cloud Platform project with billing enabled
 - Terraform >= 1.0
-- Qualys subscription with API access
-- `gcloud` CLI configured
+- Qualys subscription with Container Security module and API access
+- `gcloud` CLI installed and authenticated
+- Required APIs will be enabled automatically by Terraform
 
-## Quick Start
+### Required IAM Roles for Deployment
 
-### 1. Clone the Repository
+The user or service account deploying the infrastructure needs:
+
+- `roles/owner` or equivalent permissions on the target project, OR
+- Individual roles: `roles/iam.serviceAccountAdmin`, `roles/cloudfunctions.admin`, `roles/run.admin`, `roles/storage.admin`, `roles/pubsub.admin`, `roles/logging.configWriter`, `roles/secretmanager.admin`, `roles/datastore.owner`
+
+## Deployment
+
+### Single Project Deployment
+
+Deploy the scanner to monitor Cloud Run services within a single GCP project.
+
+#### Step 1: Clone Repository
 
 ```bash
 git clone https://github.com/nelssec/qualys-cloudrun.git
-cd qualys-cloudrun
+cd qualys-cloudrun/infrastructure
 ```
 
-### 2. Configure Variables
+#### Step 2: Configure Variables
 
 ```bash
-cd infrastructure
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your values
 ```
 
-### 3. Deploy Infrastructure
+Edit `terraform.tfvars` with your values:
+
+```hcl
+project_id = "your-project-id"
+region     = "us-central1"
+qualys_pod = "US02"  # Your Qualys POD identifier
+
+# Optional: Security hardening
+# qscanner_image              = "qualys/qscanner:1.25"  # Pin specific version
+# scan_results_retention_days = 90
+# enable_vpc_connector        = true
+# vpc_connector_name          = "projects/PROJECT/locations/REGION/connectors/NAME"
+```
+
+#### Step 3: Deploy Infrastructure
 
 ```bash
 terraform init
-terraform plan
-terraform apply
+terraform plan -out=tfplan
+terraform apply tfplan
 ```
 
-### 4. Configure Qualys Credentials
+#### Step 4: Configure Qualys Credentials
 
 ```bash
-# Set your Qualys access token
-echo -n "YOUR_QUALYS_TOKEN" | gcloud secrets versions add qualys-access-token --data-file=-
+# Add your Qualys API token to Secret Manager
+echo -n "YOUR_QUALYS_ACCESS_TOKEN" | \
+  gcloud secrets versions add qualys-access-token --data-file=-
 ```
 
-### 5. Deploy a Cloud Run Service
+To obtain your Qualys access token:
 
-Deploy any Cloud Run service and watch the automatic scanning:
+1. Log in to the Qualys Console
+2. Navigate to Administration then Users
+3. Generate an API token for your user account
+4. Ensure the account has Container Security permissions
 
-```bash
-gcloud run deploy myapp \
-  --image=gcr.io/my-project/myapp:latest \
-  --region=us-central1
-```
+#### Step 5: Verify Deployment
 
-## Configuration
-
-### Required Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `project_id` | GCP Project ID | `my-project-123` |
-| `qualys_pod` | Qualys POD identifier | `US02`, `EU1`, `IN1` |
-
-### Optional Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `region` | GCP region | `us-central1` |
-| `firestore_location` | Firestore multi-region | `nam5` |
-| `qscanner_image` | Scanner image | `qualys/qscanner:latest` |
-| `scan_cache_hours` | Cache period | `24` |
-| `notify_severity_threshold` | Alert threshold | `HIGH` |
-
-### Environment Variables
-
-Terraform configures these environment variables for the Cloud Function:
-
-- GCP_PROJECT_ID: Project where infrastructure is deployed
-- GCP_REGION: Region for Cloud Run Jobs
-- SCAN_RESULTS_BUCKET: Cloud Storage bucket name
-- QUALYS_POD: Qualys POD identifier (US02, EU1, etc.)
-- QUALYS_ACCESS_TOKEN: API token from Secret Manager
-- QSCANNER_IMAGE: Scanner image (default: qualys/qscanner:latest)
-- SCAN_TIMEOUT: Maximum scan duration in seconds (default: 1800)
-- SCAN_CACHE_HOURS: How long to cache scan results (default: 24)
-- NOTIFY_SEVERITY_THRESHOLD: Alert threshold (CRITICAL or HIGH)
-- CLOUDRUN_SERVICE_ACCOUNT: Service account for scanner jobs
-
-The qscanner command executed is:
+Deploy a test Cloud Run service to trigger scanning:
 
 ```bash
-qscanner image <image:tag> --pod <qualys_pod> --skip-verify-tls --output-format json
-```
+gcloud run deploy test-scanner \
+  --image=gcr.io/cloudrun/hello \
+  --region=us-central1 \
+  --allow-unauthenticated
 
-Authentication uses the QUALYS_ACCESS_TOKEN environment variable.
-
-## Viewing Scan Results
-
-### Query Firestore Metadata
-
-```bash
-# Using gcloud
-gcloud firestore export gs://your-bucket/export --collection-ids=scan_metadata
-```
-
-### Download Detailed Results from Cloud Storage
-
-```bash
-# List all scan results
-gsutil ls gs://your-project-qualys-scan-results/
-
-# Download a specific result
-gsutil cp gs://your-project-qualys-scan-results/gcr_io_project_app_latest/20240101120000.json .
-```
-
-### View in Cloud Console
-
-1. Navigate to **Cloud Storage** → Your scan results bucket
-2. Browse by image name and scan ID
-3. Download JSON files for detailed analysis
-
-## Monitoring
-
-### Cloud Function Logs
-
-```bash
+# View scanner function logs
 gcloud functions logs read qualys-cloudrun-scanner \
   --region=us-central1 \
   --limit=50
 ```
 
-### Active Cloud Run Jobs
+### Multi-Region Deployment
+
+Deploy scanners to multiple regions to reduce latency and comply with data residency requirements.
+
+#### Option A: Regional Terraform Workspaces
 
 ```bash
-gcloud run jobs list --region=us-central1 | grep qscanner
+cd infrastructure
+
+# Deploy to us-central1
+terraform workspace new us-central1
+terraform apply -var="region=us-central1"
+
+# Deploy to europe-west1
+terraform workspace new europe-west1
+terraform apply -var="region=europe-west1" -var="firestore_location=eur3"
+
+# Deploy to asia-northeast1
+terraform workspace new asia-northeast1
+terraform apply -var="region=asia-northeast1" -var="firestore_location=asia1"
 ```
 
-### Scan Statistics
+#### Option B: Separate State Files
 
-Query Firestore for scan statistics:
+```bash
+# US deployment
+cd infrastructure
+terraform init -backend-config="prefix=terraform/state/us-central1"
+terraform apply -var="region=us-central1"
+
+# EU deployment
+cd ../infrastructure-eu
+terraform init -backend-config="prefix=terraform/state/europe-west1"
+terraform apply -var="region=europe-west1" -var="firestore_location=eur3"
+```
+
+#### Regional Considerations
+
+- Each region maintains independent Cloud Function, Pub/Sub topic, and log sink
+- Cloud Storage bucket location should match the function region
+- Firestore location must be a multi-region: `nam5` (North America), `eur3` (Europe), `asia1` (Asia)
+- Qualys POD should match regional requirements for data residency
+
+### Organization-Wide Deployment
+
+Deploy a single scanner instance to monitor all Cloud Run deployments across your entire GCP organization.
+
+#### Architecture
+
+```
+    Project A                Project B                Project C
+    (Cloud Run)              (Cloud Run)              (Cloud Run)
+         |                        |                        |
+         +------------------------+------------------------+
+                                  |
+                                  v
+                    Organization-Level Log Sink
+                                  |
+                                  v
+                    +---------------------------+
+                    |   Security Project        |
+                    |   - Pub/Sub Topic         |
+                    |   - Cloud Function        |
+                    |   - Cloud Run Jobs        |
+                    |   - Cloud Storage         |
+                    |   - Firestore             |
+                    +---------------------------+
+```
+
+#### Step 1: Create Security Project
+
+```bash
+# Create dedicated security project
+gcloud projects create security-scanner-prod \
+  --organization=YOUR_ORG_ID
+
+# Link billing
+gcloud billing projects link security-scanner-prod \
+  --billing-account=YOUR_BILLING_ACCOUNT
+
+gcloud config set project security-scanner-prod
+```
+
+#### Step 2: Deploy Infrastructure
+
+Deploy the scanner infrastructure in the security project using the standard deployment steps above.
+
+#### Step 3: Create Organization Log Sink
+
+```bash
+# Get organization ID
+ORG_ID=$(gcloud organizations list --format="value(ID)")
+
+# Get Pub/Sub topic from Terraform output
+SECURITY_PROJECT="security-scanner-prod"
+PUBSUB_TOPIC="cloudrun-deployment-events"
+
+# Create organization-level log sink
+gcloud logging sinks create cloudrun-org-scanner \
+  pubsub.googleapis.com/projects/${SECURITY_PROJECT}/topics/${PUBSUB_TOPIC} \
+  --organization=${ORG_ID} \
+  --include-children \
+  --log-filter='resource.type="cloud_run_revision"
+protoPayload.methodName=~"google.cloud.run.v2.Services.(Create|Update)Service"'
+```
+
+#### Step 4: Grant Log Sink Permissions
+
+```bash
+# Get the log sink writer identity
+SINK_SA=$(gcloud logging sinks describe cloudrun-org-scanner \
+  --organization=${ORG_ID} \
+  --format="value(writerIdentity)")
+
+# Grant publish permission to Pub/Sub topic
+gcloud pubsub topics add-iam-policy-binding ${PUBSUB_TOPIC} \
+  --project=${SECURITY_PROJECT} \
+  --member="${SINK_SA}" \
+  --role=roles/pubsub.publisher
+```
+
+#### Step 5: Grant Cross-Project Image Access (Optional)
+
+If scanning private images from Artifact Registry in other projects:
+
+```bash
+SCANNER_SA=$(terraform output -raw scanner_service_account)
+
+# Organization-wide Artifact Registry read access
+gcloud organizations add-iam-policy-binding ${ORG_ID} \
+  --member="serviceAccount:${SCANNER_SA}" \
+  --role=roles/artifactregistry.reader \
+  --condition=None
+```
+
+#### Folder-Level Scoping
+
+To limit scanning to specific folders instead of the entire organization:
+
+```bash
+FOLDER_ID="123456789012"
+
+gcloud logging sinks create cloudrun-folder-scanner \
+  pubsub.googleapis.com/projects/${SECURITY_PROJECT}/topics/${PUBSUB_TOPIC} \
+  --folder=${FOLDER_ID} \
+  --include-children \
+  --log-filter='resource.type="cloud_run_revision"
+protoPayload.methodName=~"google.cloud.run.v2.Services.(Create|Update)Service"'
+```
+
+## Configuration Reference
+
+### Terraform Variables
+
+| Variable | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `project_id` | string | Yes | - | GCP project ID (6-30 chars, lowercase, digits, hyphens) |
+| `region` | string | No | `us-central1` | GCP region for resources |
+| `firestore_location` | string | No | `nam5` | Firestore multi-region: `nam5`, `eur3`, `asia1` |
+| `qualys_pod` | string | Yes | - | Qualys POD: `US01-US04`, `EU1-EU2`, `IN1`, `AP1-AP2`, `CA1`, `AE1`, `UK1` |
+| `qscanner_image` | string | No | `qualys/qscanner:1.25` | Scanner Docker image (pin version for production) |
+| `scan_cache_hours` | number | No | `24` | Hours to cache results (1-168) |
+| `scan_results_retention_days` | number | No | `90` | Days to retain results (30-365) |
+| `notify_severity_threshold` | string | No | `HIGH` | Alert threshold: `CRITICAL` or `HIGH` |
+| `max_function_instances` | number | No | `10` | Maximum Cloud Function instances (1-100) |
+| `enable_vpc_connector` | bool | No | `false` | Enable VPC connector for private networking |
+| `vpc_connector_name` | string | No | `""` | VPC connector resource name |
+
+### Environment Variables
+
+The Cloud Function receives these environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `GCP_PROJECT_ID` | Project where infrastructure is deployed |
+| `GCP_REGION` | Region for Cloud Run Jobs |
+| `SCAN_RESULTS_BUCKET` | Cloud Storage bucket name |
+| `QUALYS_POD` | Qualys POD identifier |
+| `QUALYS_ACCESS_TOKEN` | API token (injected from Secret Manager) |
+| `QSCANNER_IMAGE` | Scanner Docker image |
+| `SCAN_TIMEOUT` | Maximum scan duration (seconds) |
+| `SCAN_CACHE_HOURS` | Deduplication cache period |
+| `NOTIFY_SEVERITY_THRESHOLD` | Alert severity threshold |
+| `CLOUDRUN_SERVICE_ACCOUNT` | Service account for scanner jobs |
+| `QUALYS_SECRET_REF` | Secret Manager reference for Cloud Run Jobs |
+
+### Terraform Outputs
+
+| Output | Description |
+|--------|-------------|
+| `function_name` | Cloud Function name |
+| `function_url` | Cloud Function URL |
+| `scan_results_bucket` | Cloud Storage bucket for results |
+| `pubsub_topic` | Pub/Sub topic for events |
+| `scanner_service_account` | Cloud Function service account |
+| `job_service_account` | Cloud Run Jobs service account |
+| `qualys_secret_id` | Secret Manager secret ID |
+| `firestore_database` | Firestore database name |
+
+## Operations
+
+### Viewing Scan Results
+
+#### Cloud Storage (Detailed JSON)
+
+```bash
+# List all scan results
+gsutil ls -r gs://${PROJECT_ID}-qualys-scan-results/
+
+# Download specific result
+gsutil cp gs://${PROJECT_ID}-qualys-scan-results/gcr_io_project_app_v1/20240115120000.json .
+
+# View result contents
+cat 20240115120000.json | jq '.vulnerabilities'
+```
+
+#### Firestore (Queryable Metadata)
 
 ```python
 from google.cloud import firestore
 
-db = firestore.Client()
+db = firestore.Client(project='your-project')
+
+# Get recent scans with critical vulnerabilities
 scans = db.collection('scan_metadata') \
-  .where('vuln_critical', '>', 0) \
-  .stream()
+    .where('vuln_critical', '>', 0) \
+    .order_by('timestamp_str', direction=firestore.Query.DESCENDING) \
+    .limit(50) \
+    .stream()
 
 for scan in scans:
-    print(f"{scan.to_dict()['image']}: {scan.to_dict()['vuln_critical']} critical")
+    data = scan.to_dict()
+    print(f"{data['image']}: {data['vuln_critical']} critical, {data['vuln_high']} high")
 ```
+
+### Monitoring
+
+#### Cloud Function Logs
+
+```bash
+gcloud functions logs read qualys-cloudrun-scanner \
+  --region=us-central1 \
+  --limit=100
+```
+
+#### Cloud Run Job Status
+
+```bash
+# List recent scanner jobs
+gcloud run jobs list --region=us-central1 --filter="labels.purpose=qscanner"
+
+# View job executions
+gcloud run jobs executions list --job=JOB_NAME --region=us-central1
+```
+
+#### Cloud Logging Queries
+
+```bash
+# All scanner-related logs
+gcloud logging read 'resource.type="cloud_function" OR resource.type="cloud_run_job"
+labels.purpose="qscanner"' --limit=100
+
+# Scan errors only
+gcloud logging read 'resource.type="cloud_function"
+severity>=ERROR' --limit=50
+```
+
+### Alerting Integration
+
+The solution logs security alerts for high-severity findings. To integrate with external systems:
+
+1. **Cloud Monitoring**: Create alerting policies based on log-based metrics
+2. **Pub/Sub**: Configure `NOTIFICATION_TOPIC` environment variable to publish alerts
+3. **Cloud Functions**: Deploy a notification function triggered by the alert topic
 
 ## Troubleshooting
 
 ### Function Not Triggering
 
-**Check Pub/Sub subscription:**
 ```bash
-gcloud pubsub subscriptions list
-gcloud pubsub subscriptions pull cloudrun-deployment-events --limit=5
-```
-
-**Verify log sink:**
-```bash
+# Verify log sink is active
 gcloud logging sinks describe cloudrun-deployment-sink
+
+# Check Pub/Sub subscription
+gcloud pubsub subscriptions list
+
+# Test with manual message
+gcloud pubsub topics publish cloudrun-deployment-events --message='{"test": "data"}'
 ```
 
 ### Scan Failures
 
-**Check Cloud Run Jobs:**
 ```bash
-gcloud run jobs describe qscanner-<name> --region=us-central1
-gcloud run jobs executions list --job=qscanner-<name> --region=us-central1
+# View Cloud Run Job logs
+gcloud logging read 'resource.type="cloud_run_job"
+labels."run.googleapis.com/job_name"="qscanner-*"' --limit=50
+
+# Check job execution status
+gcloud run jobs executions describe EXECUTION_NAME --region=us-central1
 ```
 
-**View job logs:**
+### Permission Errors
+
 ```bash
-gcloud logging read "resource.type=cloud_run_job" --limit=100
+# Verify service account permissions
+gcloud projects get-iam-policy ${PROJECT_ID} \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:qualys-scanner-function@"
+
+# Check Secret Manager access
+gcloud secrets get-iam-policy qualys-access-token
 ```
 
 ### Invalid Qualys Credentials
 
-**Verify secret:**
 ```bash
-gcloud secrets versions access latest --secret=qualys-access-token
-```
+# Verify secret exists and has versions
+gcloud secrets versions list qualys-access-token
 
-**Update secret:**
-```bash
+# Test secret access
+gcloud secrets versions access latest --secret=qualys-access-token
+
+# Update credentials
 echo -n "NEW_TOKEN" | gcloud secrets versions add qualys-access-token --data-file=-
 ```
 
-## Security Considerations
+### Image Validation Errors
 
-- **Service Accounts**: Minimal permissions following least-privilege principle
-- **Secret Management**: Credentials stored in Secret Manager
-- **Ephemeral Jobs**: Scanner containers are temporary and auto-deleted
-- **IAM**: Function uses managed identity for GCP API access
-- **Network**: Jobs run in default VPC (can be customized for VPC SC)
+If scans fail with validation errors, check that the container image name:
+
+- Does not contain shell special characters
+- Is under 512 characters total length
+- Uses valid registry, repository, and tag formats
+- Does not include credentials or tokens in the image reference
 
 ## Cost Estimation
 
-Approximate monthly costs for 100 daily deployments:
+Approximate monthly costs based on deployment frequency:
 
-| Service | Usage | Cost |
-|---------|-------|------|
-| Cloud Functions | 3000 invocations, 512MB | ~$0.50 |
-| Cloud Run Jobs | 3000 executions, 2GB, 5min avg | ~$5.00 |
-| Cloud Storage | 100GB storage, operations | ~$2.50 |
-| Firestore | 3000 writes, 10000 reads | ~$0.50 |
-| **Total** | | **~$8.50/month** |
+| Deployments/Month | Cloud Functions | Cloud Run Jobs | Storage | Firestore | Total |
+|-------------------|-----------------|----------------|---------|-----------|-------|
+| 100 | $0.50 | $5.00 | $2.50 | $0.50 | $8.50 |
+| 500 | $2.50 | $25.00 | $5.00 | $2.00 | $34.50 |
+| 1,000 | $5.00 | $50.00 | $10.00 | $4.00 | $69.00 |
 
-Costs scale with deployment frequency and scan duration.
+Assumptions:
+- Cloud Function: 512MB memory, 60s average execution
+- Cloud Run Job: 2GB memory, 1 CPU, 5-minute average scan
+- Storage: 1MB per scan result, 90-day retention
+- Firestore: 1 document write per scan, 10 reads per scan
+
+Costs vary based on image size, vulnerability count, and retention policies.
 
 ## Development
 
@@ -273,43 +576,33 @@ pip install -r requirements.txt
 
 # Set environment variables
 export GCP_PROJECT_ID=your-project
+export GCP_REGION=us-central1
 export QUALYS_POD=US02
 export QUALYS_ACCESS_TOKEN=your-token
 export SCAN_RESULTS_BUCKET=your-bucket
+export CLOUDRUN_SERVICE_ACCOUNT=your-sa@project.iam.gserviceaccount.com
 
-# Test with functions-framework
-functions-framework --target=process_cloudrun_event --debug
+# Run with functions-framework
+functions-framework --target=process_cloudrun_event --signature-type=cloudevent --debug
 ```
 
-### Run Unit Tests
+### Testing with Sample Events
 
 ```bash
-python -m pytest tests/
+# Send test CloudEvent
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/cloudevents+json" \
+  -d @test_events/cloudrun-service-create.json
 ```
-
-## Organization-Wide Scanning
-
-You can deploy the scanner once to monitor all Cloud Run deployments across your entire GCP organization. Instead of deploying in each project, deploy in a central security project and configure an organization-level log sink.
-
-See `ORGANIZATION_WIDE.md` for detailed setup instructions.
-
-## Contributing
-
-Contributions welcome! Please open issues or pull requests.
 
 ## License
 
-MIT License - see LICENSE file
+MIT License - see LICENSE file for details.
 
-## Support
+## References
 
-For issues:
-- GitHub Issues: https://github.com/nelssec/qualys-cloudrun/issues
-- Qualys Support: https://www.qualys.com/support/
-
-## Resources
-
-- [Qualys qscanner Documentation](https://www.qualys.com/docs/qualys-container-scanning-api-guide.pdf)
+- [Qualys Container Security Documentation](https://www.qualys.com/docs/qualys-container-scanning-connector-guide.pdf)
 - [Google Cloud Run Jobs](https://cloud.google.com/run/docs/create-jobs)
-- [Cloud Functions Documentation](https://cloud.google.com/functions/docs)
+- [Cloud Functions (2nd gen)](https://cloud.google.com/functions/docs/concepts/version-comparison)
 - [Cloud Audit Logs](https://cloud.google.com/logging/docs/audit)
+- [Secret Manager](https://cloud.google.com/secret-manager/docs)
