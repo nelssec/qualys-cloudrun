@@ -50,10 +50,10 @@ class QScannerCloudRun:
         self.service_account = os.environ.get('CLOUDRUN_SERVICE_ACCOUNT')
 
         # Secret Manager configuration for Cloud Run Jobs
-        # Format: projects/PROJECT_ID/secrets/SECRET_NAME/versions/VERSION
+        # Format: projects/PROJECT_ID/secrets/SECRET_NAME (without version suffix)
         self.qualys_secret_ref = os.environ.get(
             'QUALYS_SECRET_REF',
-            f'projects/{self.project_id}/secrets/qualys-access-token/versions/latest'
+            f'projects/{self.project_id}/secrets/qualys-access-token'
         )
 
     def _validate_image_id(self, image_id: str) -> bool:
@@ -199,18 +199,23 @@ class QScannerCloudRun:
         # Add secret environment variable
         container.env.append(secret_env_var)
 
-        # Job template
-        template = run_v2.TaskTemplate(
+        # Task template (innermost layer)
+        task_template = run_v2.TaskTemplate(
             containers=[container],
             max_retries=0,  # Don't retry failed scans
             timeout='1800s',
             service_account=self.service_account
         )
 
+        # Execution template (wraps task template)
+        execution_template = run_v2.ExecutionTemplate(
+            template=task_template,
+            task_count=1
+        )
+
         # Job configuration
         job = run_v2.Job(
-            name=f'projects/{self.project_id}/locations/{self.region}/jobs/{job_name}',
-            template=template,
+            template=execution_template,
             labels={
                 'purpose': 'qscanner',
                 'managed-by': 'qualys-cloudrun-scanner'
